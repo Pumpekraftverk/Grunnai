@@ -4,3 +4,5 @@ Meas1minInterpolated/
 *.csv
 *.xlsx
 *.jpeg
+__pycache__/
+*.pyc
