@@ -6,3 +6,4 @@ Meas1minInterpolated/
 *.jpeg
 __pycache__/
 *.pyc
+*.png

@@ -12,3 +12,6 @@ dependencies:
   - dcor
   - sktime
   - u8darts
+  - ydata-profiling
+  - setuptools<81
+  - ipywidgets

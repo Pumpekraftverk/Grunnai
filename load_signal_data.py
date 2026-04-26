@@ -2,61 +2,58 @@ import os
 from glob import glob
 import pandas as pd
 
-def load_signal_data(n, search_folder, signal_file="Grunnåi_signallist.csv"):
-    """
-    Load and process signal CSV files based on a signal list.
 
-    Parameters
-    ----------
-    n : int
-        Number of rows to read from each signal file.
-    search_folder : str
-        Folder containing the measurement CSV files.
-    signal_file : str, optional
-        Path to the signal list CSV file.
-        Default is "Grunnåi_signallist.csv".
-
-    Returns
-    -------
-    dfs : list[pd.DataFrame]
-        List of processed DataFrames, one for each signal.
-    files : dict
-        Dictionary mapping signal name -> file path.
-    """
-
-    # Read the signal list and create mapping:
-    # CogniteExternalId -> signal name
+def find_signal_files(search_folder, signal_file="Grunnåi_signallist.csv"):
     signals = pd.read_csv(signal_file)
-    name_map = dict(
-        zip(
-            signals["CogniteExternalId"].astype(str).str.strip(),
-            signals["Name"].astype(str).str.strip()
-        )
-    )
 
-    # Store matching files
-    files = {}
+    rows = []
 
-    # Search for CSV files and map them to signal names
     for file in glob(os.path.join(search_folder, "*.csv")):
         cognite_id = os.path.splitext(os.path.basename(file))[0].strip()
-        if cognite_id in name_map:
-            files[name_map[cognite_id]] = file
 
-    # Load and process each file
-    dfs = []
+        match = signals[
+            signals["CogniteExternalId"].astype(str).str.strip() == cognite_id
+        ]
 
-    for name, path in files.items():
-        df = pd.read_csv(path, header=None, nrows=n+1, skiprows=1, usecols=[0, 1])
+        if not match.empty:
+            rows.append({
+                "name": str(match["Name"].iloc[0]).strip(),
+                "file": file
+            })
 
-        if not df.empty and str(df.iloc[0, 0]).strip().lower() == "unit":
+    return pd.DataFrame(rows)
+
+
+def load_signal_data(search_folder, n=None, signal_file="Grunnåi_signallist.csv"):
+    file_table = find_signal_files(search_folder, signal_file)
+
+    rows = []
+
+    for _, row in file_table.iterrows():
+        name = str(row["name"]).strip()
+        file = row["file"]
+
+        if n is None:
+            df = pd.read_csv(file, header=None, skiprows=1, usecols=[0, 1])
+        else:
+            df = pd.read_csv(file, header=None, skiprows=1, usecols=[0, 1], nrows=n + 1)
+
+        unit = None
+
+        if str(df.iloc[0, 0]).strip().lower() == "unit":
+            unit = str(df.iloc[0, 1]).strip()
             df = df.iloc[1:]
 
-        df.columns = ["Timestamp", name]
+        df.columns = ["Datetime", "signal"]
+        df["Datetime"] = pd.to_datetime(df["Datetime"], errors="coerce").dt.floor("s")
+        df["signal"] = pd.to_numeric(df["signal"], errors="coerce")
+        df = df.reset_index(drop=True)
 
-        df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce").dt.floor("s")
-        df[name] = pd.to_numeric(df[name], errors="coerce")
+        rows.append({
+            "name": name,
+            "signal_df": df,
+            "unit": unit,
+            "file": file
+        })
 
-        dfs.append(df)
-
-    return dfs, files
+    return pd.DataFrame(rows)
