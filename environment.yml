@@ -13,5 +13,5 @@ dependencies:
   - sktime
   - u8darts
   - ydata-profiling
-  - setuptools<81
+  - setuptools<81 # required for ydata-profiling package
   - ipywidgets
