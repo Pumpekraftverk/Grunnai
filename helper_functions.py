@@ -1,14 +1,19 @@
+# Basic libraries
 import numpy as np
 import pandas as pd
 
+# Access folders and extract filenames
 import os
 from glob import glob
 
+# Scaling and model
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import DBSCAN
 
+# PELT algorithm
 import ruptures as rpt
 
+# Statistics, correlation
 from scipy.stats import pearsonr
 import dcor
 
@@ -94,49 +99,40 @@ def clean_signals(dfs):
 
     return dfs, pd.DataFrame(rows)
 
-def extract_steady_states(
-    power_df,
-    operating_periods,
-    eps=0.09,
-    min_samples=5,
-    window_size=6,
-    n_periods=None
-):
-    power = power_df.rename(columns={"signal": "power"})
-    rows = []
+def apply_dbscan_to_windows(windows, eps=0.09, min_samples=5):
+    windows = windows.copy()
 
-    periods = operating_periods if n_periods is None else operating_periods.head(n_periods)
+    X = windows[["mean_power", "std_power"]].dropna()
 
-    for period_id, period in periods.iterrows():
-        wp = power[
-            (power["Datetime"] >= period["start_time"]) &
-            (power["Datetime"] <= period["end_time"])
-        ].reset_index(drop=True)
+    if X.empty:
+        windows["cluster"] = np.nan
+        windows["is_steady"] = False
+        return windows
 
-        for start in range(0, len(wp) - window_size + 1, window_size):
-            window = wp.iloc[start:start + window_size]
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
 
-            rows.append({
-                "operating_period": period_id,
-                "start_time": window["Datetime"].iloc[0],
-                "end_time": window["Datetime"].iloc[-1],
-                "mean_power": window["power"].mean(),
-                "std_power": window["power"].std(ddof=0),
-                "start_idx": start,
-                "end_idx": start + window_size - 1
-            })
+    labels = DBSCAN(
+        eps=eps,
+        min_samples=min_samples
+    ).fit_predict(X_scaled)
 
-    windows = pd.DataFrame(rows)
-
-    X = windows[["mean_power", "std_power"]]
-    X_scaled = StandardScaler().fit_transform(X)
-
-    dbscan = DBSCAN(eps=eps, min_samples=min_samples)
-    windows["cluster"] = dbscan.fit_predict(X_scaled)
-
+    windows = windows.loc[X.index].copy()
+    windows["cluster"] = labels
     windows["is_steady"] = windows["cluster"] != -1
 
-    windows = windows.sort_values(["operating_period", "start_time"]).reset_index(drop=True)
+    return windows
+
+def extract_steady_states_from_windows(windows, eps=0.09, min_samples=5):
+    windows = apply_dbscan_to_windows(
+        windows,
+        eps=eps,
+        min_samples=min_samples
+    )
+
+    windows = windows.sort_values(
+        ["operating_period", "start_time"]
+    ).reset_index(drop=True)
 
     windows["interval_id"] = (
         (windows["operating_period"] != windows["operating_period"].shift()) |
@@ -158,7 +154,7 @@ def extract_steady_states(
         .reset_index()
     )
 
-    return windows, steady_intervals, X_scaled
+    return windows, steady_intervals
 
 
 def extract_operating_periods(
@@ -228,13 +224,44 @@ def find_pelt_change_points(power_df, operating_periods, min_samples=30, n_perio
 
     return pelt_times
 
+def make_window_features(power_df, operating_periods, window_size=6, n_periods=None):
+    power = power_df.rename(columns={"signal": "power"})
+    rows = []
+
+    periods = operating_periods.head(n_periods) if n_periods else operating_periods
+
+    for period_id, period in periods.iterrows():
+        wp = power[
+            power["Datetime"].between(period["start_time"], period["end_time"])
+        ].reset_index(drop=True)
+
+        for start in range(0, len(wp) - window_size + 1, window_size):
+            window = wp.iloc[start:start + window_size]
+
+            rows.append({
+                "operating_period": period_id,
+                "start_time": window["Datetime"].iloc[0],
+                "end_time": window["Datetime"].iloc[-1],
+                "mean_power": window["power"].mean(),
+                "std_power": window["power"].std(ddof=0),
+                "start_idx": start,
+                "end_idx": start + window_size - 1
+            })
+
+    return pd.DataFrame(rows)
+
 def test_dbscan_eps(
-    X_scaled,
+    windows,
     eps_start=0.05,
     eps_stop=0.40,
     eps_step=0.02,
     min_samples=5
 ):
+    X = windows[["mean_power", "std_power"]].dropna()
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
     results = []
 
     for eps in np.arange(eps_start, eps_stop + eps_step, eps_step):
@@ -247,36 +274,13 @@ def test_dbscan_eps(
         noise_percent = (labels == -1).mean() * 100
 
         results.append({
-            "eps": round(eps, 2),
+            "epsilon": round(eps, 2),
             "n_clusters": n_clusters,
             "noise_percent": noise_percent
         })
 
     return pd.DataFrame(results)
 
-def make_window_features(power_df, operating_periods, window_size=6, n_periods=None):
-    power = power_df.rename(columns={"signal": "power"})
-    rows = []
-
-    periods = operating_periods.head(n_periods) if n_periods else operating_periods
-
-    for i, period in periods.iterrows():
-        wp = power[
-            power["Datetime"].between(period["start_time"], period["end_time"])
-        ].reset_index(drop=True)
-
-        for start in range(0, len(wp) - window_size + 1, window_size):
-            window = wp.iloc[start:start + window_size]
-
-            rows.append({
-                "operating_period": i,
-                "start_time": window["Datetime"].iloc[0],
-                "end_time": window["Datetime"].iloc[-1],
-                "mean_power": window["power"].mean(),
-                "std_power": window["power"].std(ddof=0)
-            })
-
-    return pd.DataFrame(rows)
 
 
 def correlate_with_vibration(dfs, power_df, operating_periods, vib_name):
