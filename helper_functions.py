@@ -1,160 +1,386 @@
-# Basic libraries
+from functools import reduce
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
-
-# Access folders and extract filenames
-import os
-from glob import glob
-
-# Scaling and model
-from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import DBSCAN
-
-# PELT algorithm
+from sklearn.preprocessing import StandardScaler
 import ruptures as rpt
-
-# Statistics, correlation
 from scipy.stats import pearsonr
-import dcor
 
-def find_signal_files(search_folder, signal_file="Grunnåi_signallist.csv"):
-    signals = pd.read_csv(signal_file)
 
+SIGNAL_COLUMNS = ["Datetime", "signal"]
+WINDOW_SORT_COLUMNS = ["operating_period", "start_time"]
+WINDOW_COLS = (
+    "operating_period",
+    "start_time",
+    "end_time",
+    "mean_power",
+    "std_power",
+)
+RESULT_COLS = WINDOW_COLS + (
+    "cluster",
+    "is_steady",
+)
+STEADY_INTERVAL_AGG = {
+    "start_time": ("start_time", "first"),
+    "end_time": ("end_time", "last"),
+    "n_windows": ("std_power", "size"),
+    "mean_power": ("mean_power", "mean"),
+    "mean_std_power": ("std_power", "mean"),
+    "min_power": ("mean_power", "min"),
+    "max_power": ("mean_power", "max"),
+}
+
+DEFAULT_SIGNAL_NAME_MAP = {
+    "Scada.GRUN.AGG2.G2.MV.M_P_MW": "Generator active power",
+    "Scada.GRUN.AGG2.G2.MV.M_PSP": "Set point",
+    "Scada.GRUN.AGG2.TURB2.REG.M_TURT": "Rotational speed",
+    "Scada.GRUN.AGG2.G2.LAGER.M_VIBR1": "DE Vibration",
+    "Scada.GRUN.AGG2.G2.MAGN.M_I": "Exciter current",
+    "Scada.GRUN.AGG2.TURB2.PADRAG.M_WCKT_POS": "Total needle opening position",
+    "Hydrocord.StandardData.G2_Sjakt_Trykk(=A2=HB1=BPA1)Mean": "Turbine inlet pressure",
+    "Scada.GRUN.AGG2.G2.LAGER.M_LAGTMP6": "DE Bearing temp",
+    "Scada.GRUN.AGG2.G2.LAGER.M_OLTMP2": "DE Bearing oil temp"
+}
+
+UNIT_MAP = {
+    "Turbine inlet pressure": "kPa",
+    "DE Bearing temp": "°C",
+    "DE Bearing oil temp": "°C",
+    "DE Vibration": "mm/s RMS",
+    "Exciter current": "A",
+    "Generator active power": "MW",
+    "Total needle opening position": "%",
+    "Rotational speed": "%",
+}
+
+
+def _clean_text(value):
+    if pd.isna(value):
+        return None
+
+    return " ".join(str(value).strip().split())
+
+
+def _rename_signal(signal_df, column_name):
+    return signal_df[SIGNAL_COLUMNS].rename(columns={"signal": column_name})
+
+
+def _value_column(df):
+    if "signal" in df.columns:
+        return "signal"
+
+    return next(col for col in df.columns if col != "Datetime")
+
+
+def _period_slice(df, period):
+    return df[
+        df["Datetime"].between(period["start_time"], period["end_time"])
+    ].reset_index(drop=True)
+
+
+def _read_signal_csv(file, n=None):
+    nrows = None if n is None else n + 1
+    df = pd.read_csv(
+        file,
+        header=None,
+        skiprows=1,
+        usecols=[0, 1],
+        nrows=nrows,
+    )
+
+    unit = None
+    if str(df.iloc[0, 0]).strip().lower() == "unit":
+        unit = str(df.iloc[0, 1]).strip()
+        df = df.iloc[1:]
+
+    df.columns = SIGNAL_COLUMNS
+    df["Datetime"] = pd.to_datetime(df["Datetime"], errors="coerce").dt.floor("s")
+    df["signal"] = pd.to_numeric(df["signal"], errors="coerce")
+
+    return df.reset_index(drop=True), unit
+
+
+def _sort_windows(windows):
+    return windows.sort_values(WINDOW_SORT_COLUMNS).reset_index(drop=True).copy()
+
+
+def _add_interval_id(df, change_column):
+    df["interval_id"] = (
+        (df["operating_period"] != df["operating_period"].shift())
+        | (df[change_column] != df[change_column].shift())
+    ).cumsum()
+    return df
+
+
+def _steady_intervals(windows, group_columns):
+    return (
+        windows.loc[windows["is_steady"]]
+        .groupby(group_columns, observed=True)
+        .agg(**STEADY_INTERVAL_AGG)
+        .reset_index()
+    )
+
+
+def _scaled_window_features(windows):
+    features = (
+        windows[["mean_power", "std_power"]]
+        .dropna()
+        .astype("float32")
+    )
+
+    if features.empty:
+        return features, features
+
+    scaled = StandardScaler().fit_transform(features).astype("float32")
+    return features, scaled
+
+
+def _dbscan_labels(features, eps, min_samples):
+    return DBSCAN(
+        eps=eps,
+        min_samples=min_samples,
+        algorithm="kd_tree",
+        n_jobs=1,
+    ).fit_predict(features)
+
+
+def find_signal_files(
+    search_folder,
+    signal_file="Grunnåi_signallist.csv",
+    name_map=None,
+):
+    signals = pd.read_csv(signal_file, usecols=["CogniteExternalId", "Name"])
+    signals["CogniteExternalId"] = (
+        signals["CogniteExternalId"].dropna().astype(str).str.strip()
+    )
+    signals["Name"] = signals["Name"].map(_clean_text)
+    signal_names = dict(zip(signals["CogniteExternalId"], signals["Name"]))
+    name_map = DEFAULT_SIGNAL_NAME_MAP | (name_map or {})
     rows = []
 
-    for file in glob(os.path.join(search_folder, "*.csv")):
-        cognite_id = os.path.splitext(os.path.basename(file))[0].strip()
+    for file in sorted(Path(search_folder).glob("*.csv")):
+        external_id = file.stem.strip()
 
-        match = signals[
-            signals["CogniteExternalId"].astype(str).str.strip() == cognite_id
-        ]
-
-        if not match.empty:
+        if external_id in signal_names:
             rows.append({
-                "name": str(match["Name"].iloc[0]).strip(),
-                "file": file
+                "name": name_map.get(external_id, signal_names[external_id]),
+                "external_id": external_id,
+                "file": str(file),
             })
 
     return pd.DataFrame(rows)
 
 
-def load_signal_data(search_folder, n=None, signal_file="Grunnåi_signallist.csv"):
+def load_signal_data(
+    search_folder,
+    n=None,
+    signal_file="Grunnåi_signallist.csv",
+):
     file_table = find_signal_files(search_folder, signal_file)
-
     rows = []
 
     for _, row in file_table.iterrows():
         name = str(row["name"]).strip()
-        file = row["file"]
-
-        if n is None:
-            df = pd.read_csv(file, header=None, skiprows=1, usecols=[0, 1])
-        else:
-            df = pd.read_csv(file, header=None, skiprows=1, usecols=[0, 1], nrows=n + 1)
-
-        unit = None
-
-        if str(df.iloc[0, 0]).strip().lower() == "unit":
-            unit = str(df.iloc[0, 1]).strip()
-            df = df.iloc[1:]
-
-        df.columns = ["Datetime", "signal"]
-        df["Datetime"] = pd.to_datetime(df["Datetime"], errors="coerce").dt.floor("s")
-        df["signal"] = pd.to_numeric(df["signal"], errors="coerce")
-        df = df.reset_index(drop=True)
+        df, csv_unit = _read_signal_csv(row["file"], n=n)
 
         rows.append({
             "name": name,
+            "external_id": row["external_id"],
             "signal_df": df,
-            "unit": unit,
-            "file": file
+            "unit": UNIT_MAP.get(name, csv_unit),
+            "file": row["file"],
         })
 
     return pd.DataFrame(rows)
 
+
+def find_invalid_values(signal_df, signal_name):
+    signal_name = signal_name.lower()
+
+    is_temperature_signal = "temp" in signal_name
+    is_vibration_signal = "vibrasjon" in signal_name or "vibration" in signal_name
+
+    if is_temperature_signal:
+        return signal_df["signal"] <= 0
+
+    if is_vibration_signal:
+        return (signal_df["signal"] < 0) | (signal_df["signal"] > 5.0)
+
+    return signal_df["signal"] < 0
+
+
 def clean_signals(dfs):
     dfs = dfs.copy()
-    rows = []
+    summary_rows = []
 
     for i, row in dfs.iterrows():
-        name = row["name"]
-        df = row["signal_df"].copy()
+        signal_name = row["name"]
+        signal_df = row["signal_df"].copy()
 
-        bad = df["signal"] < 0
+        invalid_values = find_invalid_values(signal_df, signal_name)
 
-        if "temp" in name.lower():
-            bad |= df["signal"] == 0
-
-        if bad.any():
-            rows.append({
-                "Signal": name,
-                "Invalid values": bad.sum(),
-                "Invalid [%]": round(100 * bad.mean(), 4)
+        if invalid_values.any():
+            summary_rows.append({
+                "Signal": signal_name,
+                "Invalid values": invalid_values.sum(),
+                "Invalid [%]": round(100 * invalid_values.mean(), 4)
             })
 
-            df.loc[bad, "signal"] = np.nan
-            df["signal"] = df["signal"].interpolate()
+            signal_df.loc[invalid_values, "signal"] = np.nan
+            signal_df["signal"] = signal_df["signal"].interpolate()
 
-            dfs.at[i, "signal_df"] = df
+            dfs.at[i, "signal_df"] = signal_df
 
-    return dfs, pd.DataFrame(rows)
+    return dfs, pd.DataFrame(summary_rows)
+
+def get_signal_df(dfs, signal_name):
+    matches = dfs.loc[dfs["name"] == signal_name, "signal_df"]
+
+    if matches.empty:
+        available = "\n".join(sorted(dfs["name"].astype(str).unique()))
+        raise KeyError(
+            f"Could not find signal named {signal_name!r}. "
+            f"Available signal names are:\n{available}"
+        )
+
+    return matches.iloc[0]
+
 
 def apply_dbscan_to_windows(windows, eps=0.09, min_samples=5):
-    windows = windows.copy()
+    data = (
+        windows[list(WINDOW_COLS)]
+        .dropna(subset=["mean_power", "std_power"])
+        .sort_values(WINDOW_SORT_COLUMNS)
+        .copy()
+    )
 
-    X = windows[["mean_power", "std_power"]].dropna()
+    if data.empty:
+        data = windows[list(WINDOW_COLS)].copy()
+        data["cluster"] = np.nan
+        data["is_steady"] = False
+        return data
 
-    if X.empty:
-        windows["cluster"] = np.nan
-        windows["is_steady"] = False
-        return windows
+    _, scaled_features = _scaled_window_features(data)
+    labels = _dbscan_labels(scaled_features, eps=eps, min_samples=min_samples)
+    data["cluster"] = labels
+    data["is_steady"] = data["cluster"] != -1
 
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    return data
 
-    labels = DBSCAN(
-        eps=eps,
-        min_samples=min_samples
-    ).fit_predict(X_scaled)
-
-    windows = windows.loc[X.index].copy()
-    windows["cluster"] = labels
-    windows["is_steady"] = windows["cluster"] != -1
-
-    return windows
 
 def extract_steady_states_from_windows(windows, eps=0.09, min_samples=5):
-    windows = apply_dbscan_to_windows(
+    clustered_windows = apply_dbscan_to_windows(
         windows,
         eps=eps,
         min_samples=min_samples
     )
 
-    windows = windows.sort_values(
-        ["operating_period", "start_time"]
-    ).reset_index(drop=True)
+    clustered_windows = (
+        clustered_windows[list(RESULT_COLS)]
+        .sort_values(WINDOW_SORT_COLUMNS)
+        .reset_index(drop=True)
+    )
+    clustered_windows = _add_interval_id(clustered_windows, "cluster")
+    steady_intervals = _steady_intervals(
+        clustered_windows,
+        ["operating_period", "interval_id", "cluster"],
+    )
 
-    windows["interval_id"] = (
-        (windows["operating_period"] != windows["operating_period"].shift()) |
-        (windows["cluster"] != windows["cluster"].shift())
-    ).cumsum()
+    return clustered_windows, steady_intervals
 
-    steady_intervals = (
-        windows[windows["is_steady"]]
-        .groupby(["operating_period", "interval_id", "cluster"])
-        .agg(
-            start_time=("start_time", "first"),
-            end_time=("end_time", "last"),
-            n_windows=("cluster", "size"),
-            mean_power=("mean_power", "mean"),
-            mean_std_power=("std_power", "mean"),
-            min_power=("mean_power", "min"),
-            max_power=("mean_power", "max")
-        )
-        .reset_index()
+
+def extract_steady_states(windows, eps=0.09, min_samples=5):
+    return extract_steady_states_from_windows(
+        windows,
+        eps=eps,
+        min_samples=min_samples,
+    )
+
+
+def extract_steady_states_by_threshold(windows, std_threshold):
+    windows = _sort_windows(windows)
+    windows["is_steady"] = windows["std_power"] <= std_threshold
+    windows = _add_interval_id(windows, "is_steady")
+    steady_intervals = _steady_intervals(
+        windows,
+        ["operating_period", "interval_id"],
     )
 
     return windows, steady_intervals
+
+
+def get_interval_mask(df, intervals):
+    mask = pd.Series(False, index=df.index)
+
+    for _, interval in intervals.iterrows():
+        mask |= df["Datetime"].between(
+            interval["start_time"],
+            interval["end_time"]
+        )
+
+    return mask
+
+
+def build_model_df(power, speed, pos, field_current, inletp, vib):
+    model_signals = {
+        "power": power,
+        "speed": speed,
+        "position": pos,
+        "field_current": field_current,
+        "inlet_pressure": inletp,
+        "vibration": vib,
+    }
+
+    signals = [
+        _rename_signal(signal_df, column_name)
+        for column_name, signal_df in model_signals.items()
+    ]
+
+    return reduce(
+        lambda left, right: left.merge(right, on="Datetime", how="inner"),
+        signals,
+    ).dropna()
+
+
+def _window_mean(signal_df, windows):
+    signal = signal_df[["Datetime", "signal"]].dropna().sort_values("Datetime")
+    intervals = pd.IntervalIndex.from_arrays(
+        windows["start_time"],
+        windows["end_time"],
+        closed="both",
+    )
+
+    window_idx = intervals.get_indexer(signal["Datetime"])
+    signal = signal.loc[window_idx >= 0].copy()
+    signal["window_idx"] = window_idx[window_idx >= 0]
+
+    means = signal.groupby("window_idx")["signal"].mean()
+    return pd.Series(
+        means.reindex(range(len(windows))).to_numpy(),
+        index=windows.index,
+    )
+
+
+def build_model_window_df(windows, speed, pos, field_current, inletp, vib):
+    model_df = windows.rename(columns={
+        "mean_power": "power",
+        "std_power": "power_std",
+    }).copy()
+
+    signals_to_average = {
+        "speed": speed,
+        "position": pos,
+        "field_current": field_current,
+        "inlet_pressure": inletp,
+        "vibration": vib,
+    }
+
+    for column_name, signal_df in signals_to_average.items():
+        model_df[column_name] = _window_mean(signal_df, model_df)
+
+    return model_df.dropna().sort_values("start_time").reset_index(drop=True)
 
 
 def extract_operating_periods(
@@ -195,60 +421,69 @@ def extract_operating_periods(
     return pd.DataFrame(periods)
 
 
-def find_pelt_change_points(power_df, operating_periods, min_samples=30, n_periods=None):
-    power = power_df.rename(columns={"signal": "power"})
+def find_pelt_change_points(
+    ref_df,
+    operating_periods,
+    min_size=6,
+    jump=1,
+):
+    value_column = _value_column(ref_df)
     pelt_times = []
 
-    periods = operating_periods if n_periods is None else operating_periods.head(n_periods)
+    for _, period in operating_periods.iterrows():
+        period_df = _period_slice(ref_df, period)
+        y = period_df[value_column].to_numpy()
 
-    for _, period in periods.iterrows():
-        wp = power[
-            (power["Datetime"] >= period["start_time"]) &
-            (power["Datetime"] <= period["end_time"])
-        ]
-
-        y = wp["power"].to_numpy()
-
-        if len(y) < min_samples:
+        if len(y) < min_size:
             continue
 
         penalty = 2 * np.log(len(y))
 
         bkps = rpt.Pelt(
             model="l2",
-            min_size=min_samples
+            min_size=min_size,
+            jump=jump
         ).fit(y).predict(pen=penalty)
 
         for b in bkps[:-1]:
-            pelt_times.append(wp["Datetime"].iloc[b - 1])
+            pelt_times.append(period_df["Datetime"].iloc[b - 1])
 
     return pelt_times
 
-def make_window_features(power_df, operating_periods, window_size=6, n_periods=None):
-    power = power_df.rename(columns={"signal": "power"})
+
+def make_window_features(
+    ref_df,
+    operating_periods,
+    window_size=6,
+    n_periods=None,
+):
+    value_column = _value_column(ref_df)
     rows = []
 
-    periods = operating_periods.head(n_periods) if n_periods else operating_periods
+    periods = (
+        operating_periods.head(n_periods)
+        if n_periods is not None
+        else operating_periods
+    )
 
     for period_id, period in periods.iterrows():
-        wp = power[
-            power["Datetime"].between(period["start_time"], period["end_time"])
-        ].reset_index(drop=True)
+        period_df = _period_slice(ref_df, period)
 
-        for start in range(0, len(wp) - window_size + 1, window_size):
-            window = wp.iloc[start:start + window_size]
+        for start in range(0, len(period_df) - window_size + 1, window_size):
+            window = period_df.iloc[start:start + window_size]
 
             rows.append({
                 "operating_period": period_id,
                 "start_time": window["Datetime"].iloc[0],
                 "end_time": window["Datetime"].iloc[-1],
-                "mean_power": window["power"].mean(),
-                "std_power": window["power"].std(ddof=0),
+                "mean_power": window[value_column].mean(),
+                "std_power": window[value_column].std(ddof=0),
                 "start_idx": start,
                 "end_idx": start + window_size - 1
             })
 
     return pd.DataFrame(rows)
+
 
 def test_dbscan_eps(
     windows,
@@ -257,46 +492,40 @@ def test_dbscan_eps(
     eps_step=0.02,
     min_samples=5
 ):
-    X = windows[["mean_power", "std_power"]].dropna()
+    features, scaled_features = _scaled_window_features(windows)
 
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    if features.empty:
+        return pd.DataFrame(columns=["epsilon", "n_clusters", "noise_percent"])
 
     results = []
 
     for eps in np.arange(eps_start, eps_stop + eps_step, eps_step):
-        labels = DBSCAN(
+        labels = _dbscan_labels(
+            scaled_features,
             eps=eps,
-            min_samples=min_samples
-        ).fit_predict(X_scaled)
-
-        n_clusters = len(set(labels) - {-1})
-        noise_percent = (labels == -1).mean() * 100
+            min_samples=min_samples,
+        )
 
         results.append({
             "epsilon": round(eps, 2),
-            "n_clusters": n_clusters,
-            "noise_percent": noise_percent
+            "n_clusters": len(set(labels) - {-1}),
+            "noise_percent": (labels == -1).mean() * 100
         })
 
     return pd.DataFrame(results)
 
 
+def correlate_with_vibration(dfs, operating_periods, vib_name):
+    import dcor
 
-def correlate_with_vibration(dfs, power_df, operating_periods, vib_name):
     vib = dfs.loc[dfs["name"] == vib_name, "signal_df"].iloc[0]
 
-    # Get timestamps during operating periods
-    operating_times = []
-    for _, period in operating_periods.iterrows():
-        mask = power_df["Datetime"].between(period["start_time"], period["end_time"])
-        operating_times.append(power_df.loc[mask, ["Datetime"]])
+    operating_mask = get_interval_mask(vib, operating_periods)
 
-    operating_times = pd.concat(operating_times).drop_duplicates()
-
-    # Keep vibration only during operating periods
-    vib_operating = operating_times.merge(vib, on="Datetime")
-    vib_operating = vib_operating.rename(columns={"signal": "vibration"})
+    vib_operating = vib.loc[
+        operating_mask,
+        ["Datetime", "signal"]
+    ].rename(columns={"signal": "vibration"})
 
     results = []
 
@@ -306,9 +535,11 @@ def correlate_with_vibration(dfs, power_df, operating_periods, vib_name):
         if name == vib_name:
             continue
 
-        data = vib_operating.merge(row["signal_df"], on="Datetime")
-        data = data.rename(columns={"signal": name})
-        data = data.dropna()
+        data = (
+            vib_operating
+            .merge(_rename_signal(row["signal_df"], name), on="Datetime")
+            .dropna()
+        )
 
         if len(data) < 2:
             continue
@@ -316,7 +547,10 @@ def correlate_with_vibration(dfs, power_df, operating_periods, vib_name):
         results.append({
             "Signal": name,
             "Pearson": pearsonr(data["vibration"], data[name])[0],
-            "Distance": dcor.distance_correlation(data["vibration"], data[name])
+            "Distance": dcor.distance_correlation(
+                data["vibration"],
+                data[name],
+            ),
         })
 
     return pd.DataFrame(results).sort_values("Distance", ascending=False)
