@@ -323,27 +323,6 @@ def get_interval_mask(df, intervals):
     return mask
 
 
-def build_model_df(power, speed, pos, field_current, inletp, vib):
-    model_signals = {
-        "power": power,
-        "speed": speed,
-        "position": pos,
-        "field_current": field_current,
-        "inlet_pressure": inletp,
-        "vibration": vib,
-    }
-
-    signals = [
-        _rename_signal(signal_df, column_name)
-        for column_name, signal_df in model_signals.items()
-    ]
-
-    return reduce(
-        lambda left, right: left.merge(right, on="Datetime", how="inner"),
-        signals,
-    ).dropna()
-
-
 def _window_mean(signal_df, windows):
     signal = signal_df[["Datetime", "signal"]].dropna().sort_values("Datetime")
     intervals = pd.IntervalIndex.from_arrays(
@@ -363,24 +342,36 @@ def _window_mean(signal_df, windows):
     )
 
 
-def build_model_window_df(windows, speed, pos, field_current, inletp, vib):
-    model_df = windows.rename(columns={
+def build_model_window_df(windows, pos, field_current, inletp, vib):
+    model_df = windows[
+        [
+            "operating_period",
+            "start_time",
+            "end_time",
+            "is_steady",
+            "interval_id",
+            "mean_power",
+        ]
+    ].rename(columns={
         "mean_power": "power",
-        "std_power": "power_std",
     }).copy()
 
-    signals_to_average = {
-        "speed": speed,
-        "position": pos,
-        "field_current": field_current,
-        "inlet_pressure": inletp,
-        "vibration": vib,
-    }
+    model_df["position"] = _window_mean(pos, model_df)
+    model_df["field_current"] = _window_mean(field_current, model_df)
+    model_df["inlet_pressure"] = _window_mean(inletp, model_df)
+    model_df["vibration"] = _window_mean(vib, model_df)
 
-    for column_name, signal_df in signals_to_average.items():
-        model_df[column_name] = _window_mean(signal_df, model_df)
+    value_cols = [
+        "power",
+        "field_current",
+        "inlet_pressure",
+        "position",
+        "vibration",
+    ]
 
-    return model_df.dropna().sort_values("start_time").reset_index(drop=True)
+    model_df.loc[~model_df["is_steady"], value_cols] = np.nan
+
+    return model_df.sort_values("start_time").reset_index(drop=True)
 
 
 def extract_operating_periods(
