@@ -10,9 +10,6 @@ dependencies:
   - scikit-learn
   - ruptures
   - dcor
-  - sktime
-  - u8darts
   - ydata-profiling
   - setuptools<81 # required for ydata-profiling package
   - ipywidgets
-  - lightgbm

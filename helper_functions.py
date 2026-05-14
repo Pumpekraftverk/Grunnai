@@ -7,10 +7,10 @@ import ruptures as rpt
 from sklearn.cluster import DBSCAN
 from sklearn.preprocessing import StandardScaler
 
+
 # ---------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------
-
 
 SIGNAL_COLUMNS = ["Datetime", "signal"]
 SIGNAL_FILE_COLUMNS = ["name", "external_id", "file"]
@@ -65,10 +65,10 @@ UNIT_MAP = {
     "Rotational speed": "%",
 }
 
+
 # ---------------------------------------------------------------------
 # Internal helper functions
 # ---------------------------------------------------------------------
-
 
 def _clean_text(value):
     if pd.isna(value):
@@ -191,7 +191,6 @@ def _dbscan_labels(features, eps, min_samples):
 # Data loading
 # ---------------------------------------------------------------------
 
-
 def find_signal_files(
     search_folder,
     signal_file="Grunnåi_signallist.csv",
@@ -280,10 +279,10 @@ def load_signal_data(
 
     return pd.DataFrame(rows, columns=SIGNAL_DATA_COLUMNS)
 
+
 # ---------------------------------------------------------------------
 # Cleaning and preprocessing
 # ---------------------------------------------------------------------
-
 
 def clean_signals(signal_table, vibration_max_value=None):
     signal_table = signal_table.copy()
@@ -338,6 +337,32 @@ def extract_operating_periods(
     power_threshold=0.5,
     min_samples=30
 ):
+    """
+    Identify operating periods based on speed and active power thresholds.
+
+    The unit is considered operating when rotational speed is above
+    `speed_threshold` and generated active power is above `power_threshold`.
+
+    Parameters
+    ----------
+    speed_df : pandas.DataFrame
+        Rotational speed signal dataframe.
+    power_df : pandas.DataFrame
+        Active power signal dataframe.
+    speed_threshold : float, optional
+        Minimum speed required for operation.
+    power_threshold : float, optional
+        Minimum active power required for operation.
+    min_samples : int, optional
+        Minimum number of samples required for an operating period.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Table with start time, end time, and number of samples for each
+        operating period.
+    """
+        
     speed = speed_df.rename(columns={"signal": "speed"})
     power = power_df.rename(columns={"signal": "power"})
 
@@ -373,13 +398,33 @@ def extract_operating_periods(
 # Steady-state detection
 # ---------------------------------------------------------------------
 
-
 def find_pelt_change_points(
     ref_df,
     operating_periods,
-    min_size=6,
-    jump=1,
+    min_size=3,
+    jump=2,
 ):
+    """
+    Detect change points in a reference signal using the PELT algorithm.
+
+    The algorithm is applied separately to each operating period.
+
+    Parameters
+    ----------
+    ref_df : pandas.DataFrame
+        Reference signal dataframe, typically active power.
+    operating_periods : pandas.DataFrame
+        Table of operating periods.
+    min_size : int, optional
+        Minimum segment length used by PELT.
+    jump : int, optional
+        Step size between possible change-point locations.
+
+    Returns
+    -------
+    list
+        Datetime values corresponding to detected change points.
+    """
     value_column = _value_column(ref_df)
     pelt_times = []
 
@@ -410,6 +455,29 @@ def make_window_features(
     window_size=6,
     n_periods=None,
 ):
+    """
+    Create fixed-size window features from a reference signal.
+
+    Each window is described by the mean and standard deviation of the
+    reference signal.
+
+    Parameters
+    ----------
+    ref_df : pandas.DataFrame
+        Reference signal dataframe.
+    operating_periods : pandas.DataFrame
+        Table of operating periods.
+    window_size : int, optional
+        Number of samples in each window.
+    n_periods : int, optional
+        Number of operating periods to process. If None, all periods are used.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Window feature table with start time, end time, mean power,
+        standard deviation of power, and index information.
+    """
     value_column = _value_column(ref_df)
     rows = []
 
@@ -520,6 +588,23 @@ def extract_steady_states(windows, eps=0.09, min_samples=5):
 
 
 def extract_steady_states_by_threshold(windows, std_threshold):
+    """
+    Extract steady-state intervals using a threshold on power variation.
+
+    Parameters
+    ----------
+    windows : pandas.DataFrame
+        Window feature table.
+    std_threshold : float
+        Maximum allowed standard deviation of active power for a window to be
+        classified as steady.
+
+    Returns
+    -------
+    tuple
+        Window table with steady-state classification and table of extracted
+        steady-state intervals.
+    """
     windows = _sort_windows(windows)
     windows["is_steady"] = windows["std_power"] <= std_threshold
     windows = _add_interval_id(windows, "is_steady")
@@ -534,7 +619,6 @@ def extract_steady_states_by_threshold(windows, std_threshold):
 # ---------------------------------------------------------------------
 # Feature dataset construction
 # ---------------------------------------------------------------------
-
 
 def window_mean(signal_df, windows):
     signal = signal_df[["Datetime", "signal"]].dropna().sort_values("Datetime")
