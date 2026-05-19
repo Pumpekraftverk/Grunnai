@@ -48,7 +48,7 @@ DEFAULT_SIGNAL_NAME_MAP = {
     "Scada.GRUN.AGG2.TURB2.REG.M_TURT": "Rotational speed",
     "Scada.GRUN.AGG2.G2.LAGER.M_VIBR1": "DE vibration",
     "Scada.GRUN.AGG2.G2.MAGN.M_I": "Exciter current",
-    "Scada.GRUN.AGG2.TURB2.PADRAG.M_WCKT_POS": "Total needle opening position",
+    "Scada.GRUN.AGG2.TURB2.PADRAG.M_WCKT_POS": "Total needle opening",
     "Hydrocord.StandardData.G2_Sjakt_Trykk(=A2=HB1=BPA1)Mean": "Turbine inlet pressure",
     "Scada.GRUN.AGG2.G2.LAGER.M_LAGTMP6": "DE bearing temperature",
     "Scada.GRUN.AGG2.G2.LAGER.M_OLTMP2": "DE bearing oil temperature",
@@ -61,8 +61,9 @@ UNIT_MAP = {
     "DE vibration": "mm/s RMS",
     "Exciter current": "A",
     "Generator active power": "MW",
-    "Total needle opening position": "%",
+    "Total needle opening": "%",
     "Rotational speed": "%",
+    "Set point": "MW"
 }
 
 

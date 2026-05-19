@@ -13,7 +13,7 @@ The repository contains notebooks and helper functions for loading time-series s
 - `PELT.ipynb` - Change-point detection using the PELT algorithm.
 - `FeatureExtraction.ipynb` - Window feature extraction, steady-state detection, and modelling dataset creation.
 - `modeling.ipynb` - Model training and evaluation using the extracted steady-state dataset.
-- `*.png` - Generated figures from the analysis notebooks.
+- `figures/` - Generated figures from the analysis notebooks.
 
 ## Clone the Repository
 
@@ -70,4 +70,3 @@ Some notebooks expect local data folders that contains .csv files from an extern
 - ruptures: Truong, C., Oudre, L., & Vayatis, N. (2020). Selective review of offline change point detection methods. *Signal Processing*, 167, 107299. <https://doi.org/10.1016/j.sigpro.2019.107299>
 - dcor: Ramos-Carreno, C., & Torrecilla, J. L. (2023). dcor: Distance correlation and energy statistics in Python. *SoftwareX*, 22, 101326. <https://doi.org/10.1016/j.softx.2023.101326>
 - ydata-profiling: Sequeira, R., et al. (2023). ydata-profiling: Accelerating data-centric AI with high-quality data. *Neurocomputing*, 554, 126585. <https://doi.org/10.1016/j.neucom.2023.126585>
-
