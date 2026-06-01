@@ -64,7 +64,7 @@ The main workflow is:
 3. Extract operating periods based on active power and rotational speed.
 4. Use PELT change-point detection and fixed-size windows to study changes in operation.
 5. Classify steady-state windows using DBSCAN or a power-variation threshold.
-6. Build a modeling dataset with features such as active power, needle position, exciter current, inlet pressure, and DE vibration.
+6. Build a modeling dataset with features such as active power, needle position, exciter current and inlet pressure.
 7. Train and evaluate machine-learning models for expected DE vibration prediction.
 
 ## Data Notes
