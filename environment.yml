@@ -6,7 +6,6 @@ dependencies:
   - numpy
   - pandas
   - matplotlib
-  - scipy
   - scikit-learn
   - ruptures
   - dcor
